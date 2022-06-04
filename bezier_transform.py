@@ -1,11 +1,26 @@
 import numpy as np
 from typing import List
 
+from svg.path import parse_path
+from xml.dom import minidom
+
+def read_svg(svg_filepath):
+    doc = minidom.parse(svg_filepath)
+    path_strings = [path.getAttribute('d') for path
+                    in doc.getElementsByTagName('path')]
+    doc.unlink()
+    path = parse_path(path_strings[0])
+    return path
+
+def get_svg_func(svg_filepath):
+    path = read_svg(svg_filepath)
+    return lambda t: path.point(t).conjugate() # flip y-axis
+
 def control_point_mat(points):
     return np.array(points).T
 
-def get_Ts(n=100):
-    t = np.linspace(0,1,n)
+def get_Ts(n=100, max_t=1):
+    t = np.linspace(0,max_t,n)
     T = []
     for i in range(n):
         ti = t[i]
@@ -20,13 +35,27 @@ class Spline:
     def __init__(self, control_points: List[float]):
         self.controls = control_point_mat(control_points)
         self.C = self.controls @ self.B
+        self.max_t = 1
+        self.cached = None
+
+    def update_controls(self, index, point):
+        self.controls.T[index] = point
+        self.C = self.controls @ self.B
+
+    def rescale_time(self, factor):
+        self.max_t = factor
 
     def get_point(self, t):
+        t = t/self.max_t
         return self.C @ get_mono_t(t)
 
-    def sample(self, n=100):
-        self.T = get_Ts(n)
-        return self.C @ self.T
+    def sample(self, n=100, use_cache=True):
+        if use_cache and self.cached:
+            return self.cached
+        self.T = get_Ts(n, max_t=1)
+        #self.C = self.controls @ self.B
+        self.cached = list(zip((self.C @ self.T).T))
+        return self.cached
 
 #-- point at t: [Control Points][Bernstein Basis][T vector in monomial basis]
 #dims: [2 x 1]: [ 2 x 4 ]       [ 4 x 4 ]         [ 4 x 1 ]

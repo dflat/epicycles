@@ -6,8 +6,8 @@ import time
 import pygame
 from pygame.locals import *
 from collections import deque
-from fourier import FourierTransform, ck
-from bezier_transform import example_curve
+from fourier import FourierTransform
+from bezier_transform import example_curve, get_svg_func, Spline
 
 BG_COLOR = pygame.Color(0,0,0)
 WHITE = pygame.Color(255,255,255)
@@ -18,35 +18,135 @@ class Curve:
         self.controls = controls
 
 class Point:
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-class Endpoint(Point):
-    pass
-class Barpoint(Point):
-    pass
+    def __init__(self, point):
+        self.group.append(self)
+        self.pos = point
+        self.parent_curves = { } # map Spline => point's index 0,1,2, or 3
 
-class Path:
+    @property
+    def pos(self):
+        return self.xy
+
+    @pos.setter
+    def pos(self, val):
+        self.xy = np.array(val)
+        self.x = val[0]
+        self.y = val[1]
+
+class Endpoint(Point):
+    group = []
+    r = 4
+    _color = pygame.Color(255,255,0)
+    color = _color
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args,**kwargs)
+        self.first = False
+
+class Barpoint(Point):
+    group = []
+    r = 3
+    _color = pygame.Color(255,0,255)
+    color = _color
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args,**kwargs)
+        self.root = None
+
+class PathBuilder:
+    min_hover_dist = 10
+
     def __init__(self):
         self.curves = []
         self.points = []
         self.n = 0
+        self.dragged_point = None
 
-    def place_point(self, x, y):
-        i = self.n % 4
-        if i in [0,3]:
-            p = Endpoint(x,y)
+    def get_point(self, t):
+        # t is a float in [0,1]
+        n = len(self.curves)
+        T = 1/n
+        index, ti = divmod(t, T)
+        if index == n:
+            index = n-1
+            ti = T
+        print(index, ti, t)
+        return complex(*self.curves[int(index)].get_point(ti*n)).conjugate()
+        #t = t/T
+
+    def collisions(self):
+        mp = ui.mousepos 
+        closest = 2e20
+        selected = None
+        for p in self.points:
+            p.color = p._color
+            ds = np.linalg.norm(mp - p.xy)
+            if ds < closest:
+                closest = ds
+                selected = p
+        return selected if closest < self.min_hover_dist else None
+
+
+    def connect(self, a, b, c, d):
+        spline = Spline([p.pos for p in (a,b,c,d)])
+        for i, p in enumerate([a,b,c,d]):
+            p.parent_curves[spline] = i
+        self.curves.append(spline)
+
+    def update(self, dt):
+        if self.dragged_point is None:
+            selected = self.collisions()
+            if selected:
+                selected.color = WHITE
+                if ui.dragging and self.dragged_point is None:
+                    self.dragged_point = selected
+
+        elif self.dragged_point: 
+            self.dragged_point.pos = ui.mousepos
+            for curve, index in self.dragged_point.parent_curves.items():
+                # update curves that depend on the dragged point
+                curve.update_controls(index, self.dragged_point.pos)
+                curve.sample(use_cache=False)
+
+        if ui.clicked:
+            if self.dragged_point:
+                self.dragged_point = None
+            else:
+                self.place_point(pygame.mouse.get_pos())
+
+    def place_point(self, point):
+        i = self.n % 3
+        if i == 0:
+            p = Endpoint(point)
+            if self.n == 0:
+                p.first = True
+            else:
+                self.connect(*self.points[-3:], p)
+                self.points[-1].root = p # connect endpoint (4) to 3rd control 
         elif i in [1,2]:
-            p = Barpoint(x,y)
+            p = Barpoint(point)
+            if i == 1:
+                p.root = self.points[-1] # connect startpoint (1) to 2nd control
+
         self.points.append(p)
         self.n += 1
 
-    def add_curve(self, curve:Curve):
-        self.curves.append(curve)
+    def draw(self, surf):
+        for p in self.points:
+            if p in Barpoint.group:
+                if p.root is not None:
+                    pygame.draw.line(surf, (0,255,255),
+                                     p.pos, p.root.pos, width=1) 
+            pygame.draw.circle(surf, p.color, (p.x,p.y), p.r)
+
+        for curve in self.curves:
+            points = curve.sample(use_cache=True)
+            pygame.draw.aalines(surf, WHITE, False, points)
+
         
 class Epicycler:
     group = []
-    scale = 20
+    scale = 1#20
     def __init__(self, parent=None, 
                        radius=1, phase=0, freq=1,
                        slowdown=1, color=WHITE):
@@ -105,14 +205,14 @@ class Pencil(Epicycler):
                             self.pos_history[i], self.pos_history[i+1], width=2)
 
 class Game:
-    W = 640
-    H = 480
+    W = 1920#640
+    H = 1080#480
     center = np.array((W/2, H/2))
 
     def __init__(self):
         self.fps = 60.0
-        self.width = 640
-        self.height = 480
+        self.width = Game.W
+        self.height = Game.H
         self.clock = pygame.time.Clock()
         pygame.init()
         self.screen = pygame.display.set_mode((self.width, self.height))
@@ -121,55 +221,32 @@ class Game:
         self.slowdown=10
 
         self.epis = []
-        self.f = example_curve()
-        self.ft = FourierTransform(self.f)
-        self.k = 0
 
-        t="""
-        e0 = Epicycler(parent=None, radius=3,
-                  phase=0, freq=1, slowdown=10, color=BG_COLOR.lerp(WHITE, .1))
-        e1 = Epicycler(parent=e0, radius=2,
-                  phase=0, freq=2, slowdown=10, color=BG_COLOR.lerp(WHITE, .2))
-        e2 = Epicycler(parent=e1, radius=1, phase=math.pi/4,
-                       freq=3, slowdown=10, color=BG_COLOR.lerp(WHITE, .3))
-        e3 = Pencil(parent=e2, radius=2, phase=math.pi/4,
-                       freq=-1, slowdown=10, color=BG_COLOR.lerp(WHITE, .4))
-                       """
-                       
+        self.path_builder = PathBuilder()
+
+        #self.ft = FourierTransform(example_curve())
+        #self.ft = FourierTransform(get_svg_func('svgs/capital-xi.svg'),
+        #                           center_on_screen=True)
+        self.ft = FourierTransform(self.path_builder.get_point,
+                                    center_on_screen=True)
+            
     def add_fourier_cycle(self):
         parent = self.epis[-1] if self.epis else None
         if parent:
             parent.trace = False
 
-        Ck = ck(self.k, self.f) #self.ft.C(self.k)
-        r = np.linalg.norm(Ck)
-        phase = np.arctan2(Ck.imag, Ck.real)
-        freq = self.k
-        epi = Pencil(parent=parent, radius=r, freq=freq, phase=phase,
+        ck = self.ft.next() 
+
+        ## create epicycle
+        epi = Pencil(parent=parent, radius=ck.r, freq=ck.freq, phase=ck.phase,
                      slowdown=self.slowdown, trace=True, color=WHITE) 
         self.epis.append(epi)
-        t="""
-        if self.k > 0:
-            ck = self.ft.C(-self.k)
-            freq = -self.k
-            r = np.linalg.norm(ck)
-            phase = np.arctan2(ck.imag, ck.real)
-            epi = Pencil(parent=parent, radius=r, freq=freq, phase=phase,
-                         slowdown=self.slowdown, trace=True, color=WHITE) 
-            self.epis.append(epi)
-            """
 
+        # recolor epicycles
         n = len(self.epis)
         for i, e in enumerate(self.epis):
             L = (i+1)/n 
-            e.color = BG_COLOR.lerp(WHITE, L)
-
-        if self.k <= 0:
-            self.k = abs(self.k) + 1 
-        else:
-            self.k = -self.k
-        #self.k *= (-1)**(n-1) # alternate negative and positive frequencies
-        print('next freq (k):', self.k)
+            e.color = BG_COLOR.lerp(WHITE, 0.2*(1-L) + 0.8*L)
 
     def add_cycle(self): 
         parent = self.epis[-1] if self.epis else None
@@ -200,18 +277,35 @@ class Game:
                     sys.exit()
                 if event.key == K_e:
                     game.add_fourier_cycle()
+                if event.key == K_w:
+                    for i in range(50):
+                        game.add_fourier_cycle()
                 if event.key == K_j:
                     Epicycler.scale /= 1.25
                 if event.key == K_k:
                     Epicycler.scale *= 1.25
+            if event.type == pygame.MOUSEBUTTONUP:
+                print(event.button, 'button')
+                if event.button == 1:
+                    ui.mousestate = 'up'
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    ui.mousestate = 'down'
+
+        ui.update(dt)
 
         for epi in Epicycler.group:
             epi.update(dt)
+
+        self.path_builder.update(dt)
      
     def draw(self):
         self.screen.fill(BG_COLOR) 
+
         for epi in Epicycler.group:
             epi.draw(self.screen)
+
+        self.path_builder.draw(self.screen)
 
         pygame.display.flip()
      
@@ -226,6 +320,24 @@ class Game:
             #    time.sleep(2)
             #    started = True
             dt = self.clock.tick(self.fps) # fix timing bug
+
+class UI:
+    def __init__(self):
+        self.mousestate = None
+        self.mousepos = None 
+        self.dragging = False
+        self.clicked = False
+
+    def update(self,dt):
+        self.clicked = False
+        self.mousepos = pygame.mouse.get_pos()
+        self.dragging = self.mousestate == 'down'
+        self.clicked = self.mousestate == 'up'
+        if self.clicked:
+            self.mousestate = None
+            self.dragging = False
+
+ui = UI()
 
 game = Game()
 game.run()
