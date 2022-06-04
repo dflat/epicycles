@@ -1,4 +1,6 @@
 import sys
+import os
+import pickle
 import numpy as np
 import math
 import random
@@ -55,12 +57,25 @@ class Barpoint(Point):
 
 class PathBuilder:
     min_hover_dist = 10
+    SAVE_DIR = os.path.join('assets','paths')
 
     def __init__(self):
         self.curves = []
         self.points = []
         self.n = 0
         self.dragged_point = None
+
+    def save(self, index):
+        with open(f'{index}.pickle', 'wb') as f:
+            pickle.dump(self, f)
+
+    def load(self, index):
+        with open(f'{index}.pickle', 'rb') as f:
+            obj = pickle.load(f)
+            self.curves = obj.curves
+            self.points = obj.points
+            self.n = obj.n
+            self.dragged_point = obj.dragged_point
 
     def get_point(self, t):
         # t is a float in [0,1]
@@ -103,12 +118,14 @@ class PathBuilder:
 
         elif self.dragged_point: 
             ds = ui.mousepos - ui.mousepos_history[0]
-            self.dragged_point.pos = ui.mousepos
+            #self.dragged_point.pos = ui.mousepos
+            self.dragged_point.pos = (min(game.windows[0].r, ui.mousepos[0]),
+                                      min(game.windows[0].b, ui.mousepos[1]))
             #self.dragged_point.pos += ds 
 
             # translate any child control points attatched to the dragged_point
-            children = [i for i in Barpoint.group 
-                        if i.root is self.dragged_point]
+            children = [i for i in self.points 
+                    if isinstance(i,Barpoint) and i.root is self.dragged_point]
             for child in children:
                 child.pos += ds
                 for curve, index in child.parent_curves.items():
@@ -124,8 +141,8 @@ class PathBuilder:
         if ui.clicked:
             if self.dragged_point:
                 self.dragged_point = None
-            else:
-                self.place_point(pygame.mouse.get_pos())
+            elif game.windows[0].contains(ui.mousepos):
+                self.place_point(ui.mousepos)
 
     def place_point(self, point):
         i = self.n % 3
@@ -146,7 +163,8 @@ class PathBuilder:
 
     def draw(self, surf):
         for p in self.points:
-            if p in Barpoint.group:
+            #if p in Barpoint.group:
+            if type(p).__name__ == 'Barpoint':
                 if p.root is not None:
                     pygame.draw.line(surf, (0,255,255),
                                      p.pos, p.root.pos, width=1) 
@@ -222,20 +240,30 @@ class Window:
         self.w = w
         self.h = h
         self.center = np.array((x_off, y_off)) + np.array((w/2,h/2))
-        self.top_right = np.array((x_off + w, y_off))
-        self.bot_right = np.array((x_off + w, y_off + h))
+        self.l = x_off
+        self.r = x_off + self.w
+        self.t = y_off
+        self.b = y_off + self.h
+        self.top_right = np.array((self.r, self.t))
+        self.bot_right = np.array((self.r, self.b))
+
+    def contains(self, point):
+        x, y = point
+        return self.l < x < self.r and self.t < y < self.b 
 
     def draw(self, surf):
         pygame.draw.line(surf, WHITE, self.top_right, self.bot_right, width=2)
 
 class EpicycleManager:
-    def __init__(self, path_builder): 
+    def __init__(self, time_series_func): 
         self.slowdown = 10
         self.t = 0
-        self.path_builder = path_builder 
+        self.time_series_func = time_series_func
         self.reset_fourier()
             
     def add_fourier_cycle(self):
+        if len(game.path_builder.curves) < 1:
+            return
         parent = self.epis[-1] if self.epis else None
         if parent:
             parent.trace = False
@@ -254,7 +282,7 @@ class EpicycleManager:
             e.color = BG_COLOR.lerp(WHITE, 0.2*(1-L) + 0.8*L)
 
     def reset_fourier(self):
-        self.ft = FourierTransform(self.path_builder.get_point,
+        self.ft = FourierTransform(self.time_series_func,
                                     center_on_screen=True)
         self.epis = []
 
@@ -281,22 +309,13 @@ class Game:
         pygame.init()
         self.screen = pygame.display.set_mode((self.width, self.height))
         self.dt = 1/self.fps 
-        #self.t = 0
-        #self.slowdown=10
 
-
-        #self.ft = FourierTransform(example_curve())
         #self.ft = FourierTransform(get_svg_func('svgs/xi.svg'),
         #                           center_on_screen=True)
-        #self.reset_fourier()
-        #self.ft = FourierTransform(self.path_builder.get_point,
-        #                            center_on_screen=True)
         self.path_builder = PathBuilder()
-        self.epicycle_manager = EpicycleManager(self.path_builder)
+        self.epicycle_manager = EpicycleManager(self.path_builder.get_point)
 
     def update(self, dt):
-        #self.t += dt/1000/self.slowdown
-
         for event in pygame.event.get():
             if event.type == QUIT:
                 pygame.quit() 
@@ -317,6 +336,21 @@ class Game:
                     Epicycler.scale *= 1.25
                 if event.key == K_r:
                     game.epicycle_manager.reset_fourier()
+
+                if event.key == K_s:
+                    ui.state = 'saving'
+                if event.key == K_l:
+                    ui.state = 'loading'
+                if ui.state == 'saving' and event.key in range(49,58):
+                    slot = event.key - 48
+                    print('saving to slot', slot)
+                    game.path_builder.save(slot)
+                    ui.state = None
+                if ui.state == 'loading' and event.key in range(49,58):
+                    slot = event.key - 48
+                    print('loading from slot', slot)
+                    game.path_builder.load(slot)
+                    ui.state = None
 
             if event.type == pygame.MOUSEBUTTONUP:
                 print(event.button, 'button')
@@ -369,6 +403,7 @@ class UI:
         self.dragging = False
         self.clicked = False
         self.mousepos_history = deque(maxlen=2)
+        self.state = None
 
     def update(self,dt):
         self.clicked = False
