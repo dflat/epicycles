@@ -70,7 +70,7 @@ class PathBuilder:
         if index == n:
             index = n-1
             ti = T
-        print(index, ti, t)
+        #print(index, ti, t)
         return complex(*self.curves[int(index)].get_point(ti*n)).conjugate()
         #t = t/T
 
@@ -102,11 +102,24 @@ class PathBuilder:
                     self.dragged_point = selected
 
         elif self.dragged_point: 
+            ds = ui.mousepos - ui.mousepos_history[0]
             self.dragged_point.pos = ui.mousepos
+            #self.dragged_point.pos += ds 
+
+            # translate any child control points attatched to the dragged_point
+            children = [i for i in Barpoint.group 
+                        if i.root is self.dragged_point]
+            for child in children:
+                child.pos += ds
+                for curve, index in child.parent_curves.items():
+                    curve.update_controls(index, child.pos)
+                    #curve.sample(use_cache=False)
+
             for curve, index in self.dragged_point.parent_curves.items():
                 # update curves that depend on the dragged point
                 curve.update_controls(index, self.dragged_point.pos)
                 curve.sample(use_cache=False)
+            
 
         if ui.clicked:
             if self.dragged_point:
@@ -169,10 +182,10 @@ class Epicycler:
 
     def get_tip(self):
         R = self.scale*self.r
-        self.origin = self.parent.tip if self.parent else Game.center
+        self.origin = self.parent.tip if self.parent else Game.windows[1].center
         self.tip = self.origin + R*np.array(
-                (math.cos(-(self.angular*game.t + self.phase)),
-                 math.sin(-(self.angular*game.t + self.phase))))
+                (math.cos(-(self.angular*game.epicycle_manager.t + self.phase)),
+                 math.sin(-(self.angular*game.epicycle_manager.t + self.phase))))
         # the negative angle is due to pygame reversing positive=CCW convention 
 
     def draw(self, surf):
@@ -187,7 +200,7 @@ class Pencil(Epicycler):
     def __init__(self, *args, pencil_color=BLUE, trace=True,
                 trace_len=1000, **kwargs):
         self.trace = trace
-        self.trace_len = int(game.slowdown*game.fps) #trace_len
+        self.trace_len = int(game.epicycle_manager.slowdown*game.fps) #trace_len
         self.pos_history = deque(maxlen=self.trace_len)
         self.pencil_color = pencil_color
         super().__init__(*args, **kwargs)
@@ -204,31 +217,23 @@ class Pencil(Epicycler):
                 pygame.draw.line(surf, BG_COLOR.lerp(self.pencil_color, i/n), 
                             self.pos_history[i], self.pos_history[i+1], width=2)
 
-class Game:
-    W = 1920#640
-    H = 1080#480
-    center = np.array((W/2, H/2))
+class Window:
+    def __init__(self, w, h, x_off=0, y_off=0):
+        self.w = w
+        self.h = h
+        self.center = np.array((x_off, y_off)) + np.array((w/2,h/2))
+        self.top_right = np.array((x_off + w, y_off))
+        self.bot_right = np.array((x_off + w, y_off + h))
 
-    def __init__(self):
-        self.fps = 60.0
-        self.width = Game.W
-        self.height = Game.H
-        self.clock = pygame.time.Clock()
-        pygame.init()
-        self.screen = pygame.display.set_mode((self.width, self.height))
-        self.dt = 1/self.fps 
+    def draw(self, surf):
+        pygame.draw.line(surf, WHITE, self.top_right, self.bot_right, width=2)
+
+class EpicycleManager:
+    def __init__(self, path_builder): 
+        self.slowdown = 10
         self.t = 0
-        self.slowdown=10
-
-        self.epis = []
-
-        self.path_builder = PathBuilder()
-
-        #self.ft = FourierTransform(example_curve())
-        #self.ft = FourierTransform(get_svg_func('svgs/capital-xi.svg'),
-        #                           center_on_screen=True)
-        self.ft = FourierTransform(self.path_builder.get_point,
-                                    center_on_screen=True)
+        self.path_builder = path_builder 
+        self.reset_fourier()
             
     def add_fourier_cycle(self):
         parent = self.epis[-1] if self.epis else None
@@ -248,42 +253,71 @@ class Game:
             L = (i+1)/n 
             e.color = BG_COLOR.lerp(WHITE, 0.2*(1-L) + 0.8*L)
 
-    def add_cycle(self): 
-        parent = self.epis[-1] if self.epis else None
-        if parent:
-            parent.trace = False
-        r = random.randint(1,4)
-        freq = random.randint(-6,6)
-        epi = Pencil(parent=parent, radius=r, freq=freq, phase=0,
-                     slowdown=self.slowdown, trace=True, color=WHITE) 
-        self.epis.append(epi)
-        # remap colors
-        n = len(self.epis)
-        for i, e in enumerate(self.epis):
-            L = (i+1)/n 
-            e.color = BG_COLOR.lerp(WHITE, L)
-
+    def reset_fourier(self):
+        self.ft = FourierTransform(self.path_builder.get_point,
+                                    center_on_screen=True)
+        self.epis = []
 
     def update(self, dt):
         self.t += dt/1000/self.slowdown
+        for epi in self.epis:
+            epi.update(dt)
+
+    def draw(self, surf):
+        for epi in self.epis:
+            epi.draw(surf)
+
+class Game:
+    W = 1600#1920#640
+    H = 800#1080#480
+    center = np.array((W/2, H/2))
+    windows = [Window(W/2,H,0,0), Window(W/2,H,x_off=W/2,y_off=0)]
+
+    def __init__(self):
+        self.fps = 60.0
+        self.width = Game.W
+        self.height = Game.H
+        self.clock = pygame.time.Clock()
+        pygame.init()
+        self.screen = pygame.display.set_mode((self.width, self.height))
+        self.dt = 1/self.fps 
+        #self.t = 0
+        #self.slowdown=10
+
+
+        #self.ft = FourierTransform(example_curve())
+        #self.ft = FourierTransform(get_svg_func('svgs/xi.svg'),
+        #                           center_on_screen=True)
+        #self.reset_fourier()
+        #self.ft = FourierTransform(self.path_builder.get_point,
+        #                            center_on_screen=True)
+        self.path_builder = PathBuilder()
+        self.epicycle_manager = EpicycleManager(self.path_builder)
+
+    def update(self, dt):
+        #self.t += dt/1000/self.slowdown
 
         for event in pygame.event.get():
             if event.type == QUIT:
                 pygame.quit() 
                 sys.exit() 
+
             if event.type == pygame.KEYDOWN:
                 if event.key == K_x:
                     pygame.quit()
                     sys.exit()
                 if event.key == K_e:
-                    game.add_fourier_cycle()
+                    game.epicycle_manager.add_fourier_cycle()
                 if event.key == K_w:
                     for i in range(50):
-                        game.add_fourier_cycle()
+                        game.epicycle_manager.add_fourier_cycle()
                 if event.key == K_j:
                     Epicycler.scale /= 1.25
                 if event.key == K_k:
                     Epicycler.scale *= 1.25
+                if event.key == K_r:
+                    game.epicycle_manager.reset_fourier()
+
             if event.type == pygame.MOUSEBUTTONUP:
                 print(event.button, 'button')
                 if event.button == 1:
@@ -294,18 +328,24 @@ class Game:
 
         ui.update(dt)
 
-        for epi in Epicycler.group:
-            epi.update(dt)
-
         self.path_builder.update(dt)
+        self.epicycle_manager.update(dt)
+
+        #for epi in Epicycler.group:
+        #    epi.update(dt)
+
      
     def draw(self):
         self.screen.fill(BG_COLOR) 
 
-        for epi in Epicycler.group:
-            epi.draw(self.screen)
+        for window in Game.windows:
+            window.draw(self.screen)
 
+        #for epi in Epicycler.group:
+        #    epi.draw(self.screen)
         self.path_builder.draw(self.screen)
+        self.epicycle_manager.draw(self.screen)
+
 
         pygame.display.flip()
      
@@ -325,12 +365,15 @@ class UI:
     def __init__(self):
         self.mousestate = None
         self.mousepos = None 
+        self.prev_mousepos = None
         self.dragging = False
         self.clicked = False
+        self.mousepos_history = deque(maxlen=2)
 
     def update(self,dt):
         self.clicked = False
         self.mousepos = pygame.mouse.get_pos()
+        self.mousepos_history.append(np.array(self.mousepos))
         self.dragging = self.mousestate == 'down'
         self.clicked = self.mousestate == 'up'
         if self.clicked:
